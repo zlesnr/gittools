@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/jedib0t/go-pretty/table"
 	log "github.com/sirupsen/logrus"
-	ci "github.com/xaque208/znet/pkg/continuous"
 
 	"github.com/spf13/cobra"
 )
@@ -16,8 +18,9 @@ var outputFormat string
 // var outputPlain bool
 
 var (
-	appName = "git-merged"
-	version = "unknown"
+	appName        = "git-merged"
+	version        = "unknown"
+	mainBranchName = "master"
 )
 
 // Command represents the base command when called without any subcommands
@@ -34,22 +37,66 @@ var verbose bool
 var trace bool
 
 func run(cmd *cobra.Command, args []string) {
-	fmt.Printf("%s version %s\n", appName, version)
-
 	f := filepath.Base(".")
 
-	r, err := git.PlainOpen(f)
+	repo, err := git.PlainOpen(f)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	heads, _, err := ci.RepoRefs(r)
+	revHash, err := repo.ResolveRevision(plumbing.Revision(mainBranchName))
 	if err != nil {
-		log.Error(err)
+		log.Fatal(err)
 	}
 
-	log.Infof("refs: %+v", heads)
+	revCommit, err := repo.CommitObject(*revHash)
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	refs, err := repo.Branches()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	t := table.NewWriter()
+	t.SetOutputMirror(os.Stdout)
+	t.SetStyle(table.StyleColoredBright)
+	t.AppendHeader(table.Row{"Branch", fmt.Sprintf("Merged to %s", mainBranchName)})
+
+	err = refs.ForEach(func(ref *plumbing.Reference) error {
+		// The HEAD is omitted in a `git show-ref` so we ignore the symbolic
+		// references, the HEAD
+		if ref.Type() == plumbing.SymbolicReference {
+			return nil
+		}
+
+		if ref.Name().IsBranch() || ref.Name().IsRemote() {
+
+			headCommit, err := repo.CommitObject(ref.Hash())
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			isAncestor, err := headCommit.IsAncestor(revCommit)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			log.WithFields(log.Fields{
+				"name":       ref.Name().Short(),
+				"isAncestor": isAncestor,
+			}).Debug("ref")
+
+			t.AppendRow([]interface{}{ref.Name().Short(), isAncestor})
+
+			// t.AppendRow(table.Row{ref.Name().Short(), isAncestor}, rowConfigAutoMerge)
+		}
+
+		return nil
+	})
+
+	t.Render()
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
